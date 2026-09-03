@@ -1,0 +1,196 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum AnimeStatus {
+  PENDING
+  SCRAPING
+  COMPLETED
+  ERROR
+}
+
+enum EpisodeStatus {
+  PENDING
+  DOWNLOADING
+  UPLOADED
+  ERROR
+}
+
+enum FileAudioType {
+  DUB
+  SUB
+}
+
+enum PostStatus {
+  DRAFT
+  SCHEDULED
+  PUBLISHING
+  PUBLISHED
+  FAILED
+}
+
+enum TargetChannel {
+  PUBLIC
+  VIP
+  BOTH
+}
+
+model DriveAccount {
+  id                 String         @id @default(uuid())
+  name               String
+  email              String?
+  clientId           String
+  clientSecret       String
+  refreshToken       String
+  accessToken        String?
+  tokenExpiry        DateTime?
+  totalStorageBytes  BigInt         @default(5497558138880) // 5 TB in bytes
+  usedStorageBytes   BigInt         @default(0)
+  dailyUploadedBytes BigInt         @default(0) // Track 750GB / day limit
+  dailyResetAt       DateTime       @default(now())
+  isActive           Boolean        @default(true)
+  isQuotaExceeded    Boolean        @default(false)
+  statusMessage      String?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  animeTitles        AnimeTitle[]
+  episodes           AnimeEpisode[]
+  files              EpisodeFile[]
+
+  @@map("drive_accounts")
+}
+
+model AnimeTitle {
+  id             String         @id @default(uuid())
+  russianTitle   String
+  englishTitle   String
+  originalTitle  String?
+  description    String?        @db.Text
+  tags           String[]       @default([])
+  genres         String[]       @default([])
+  sourceUrl      String         @unique
+  coverUrls      String[]       @default([])
+  driveFolderId  String?
+  driveAccountId String?
+  driveAccount   DriveAccount?  @relation(fields: [driveAccountId], references: [id], onDelete: SetNull)
+  status         AnimeStatus    @default(PENDING)
+  errorMessage   String?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  episodes       AnimeEpisode[]
+  telegramPosts  TelegramPost[]
+
+  @@index([russianTitle])
+  @@index([englishTitle])
+  @@map("anime_titles")
+}
+
+model AnimeEpisode {
+  id               String         @id @default(uuid())
+  animeTitleId     String
+  animeTitle       AnimeTitle     @relation(fields: [animeTitleId], references: [id], onDelete: Cascade)
+  episodeNumber    Int
+  title            String?
+  sourceEpisodeUrl String
+  driveFolderId    String?
+  driveAccountId   String?
+  driveAccount     DriveAccount?  @relation(fields: [driveAccountId], references: [id], onDelete: SetNull)
+  status           EpisodeStatus  @default(PENDING)
+  errorMessage     String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  files            EpisodeFile[]
+  telegramPosts    TelegramPost[]
+
+  @@unique([animeTitleId, episodeNumber])
+  @@map("anime_episodes")
+}
+
+model EpisodeFile {
+  id                String        @id @default(uuid())
+  episodeId         String
+  episode           AnimeEpisode  @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  type              FileAudioType // DUB or SUB
+  quality           String        // e.g. "1080p", "720p", "480p", "360p"
+  fileName          String
+  fileSizeBytes     BigInt        @default(0)
+  sourceStreamUrl   String?       @db.Text
+  driveFileId       String?
+  driveAccountId    String?
+  driveAccount      DriveAccount? @relation(fields: [driveAccountId], references: [id], onDelete: SetNull)
+  driveViewLink     String?
+  driveDownloadLink String?
+  mimeType          String?       @default("video/mp4")
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  @@unique([episodeId, type, quality])
+  @@map("episode_files")
+}
+
+model TelegramPost {
+  id             String         @id @default(uuid())
+  animeTitleId   String
+  animeTitle     AnimeTitle     @relation(fields: [animeTitleId], references: [id], onDelete: Cascade)
+  episodeId      String?
+  episode        AnimeEpisode?  @relation(fields: [episodeId], references: [id], onDelete: SetNull)
+  status         PostStatus     @default(DRAFT)
+  scheduledAt    DateTime?
+  publishedAt    DateTime?
+  targetChannel  TargetChannel  @default(PUBLIC)
+  caption        String         @db.Text
+  selectedAudio  String         @default("BOTH") // "DUB", "SUB", "BOTH"
+  selectedQualities String[]    @default(["720p"])
+  tgMessageId    Int?
+  tgFileId       String?
+  errorMessage   String?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@map("telegram_posts")
+}
+
+model SystemSetting {
+  key            String         @id
+  encryptedValue String         @db.Text
+  category       String         @default("GENERAL") // "TELEGRAM", "GOOGLE", "SCRAPER", "SECURITY"
+  description    String?
+  updatedAt      DateTime       @updatedAt
+
+  @@map("system_settings")
+}
+
+model Proxy {
+  id             String         @id @default(uuid())
+  url            String         @unique // e.g. http://user:pass@ip:port or socks5://...
+  protocol       String         @default("http")
+  isActive       Boolean        @default(true)
+  failCount      Int            @default(0)
+  latencyMs      Int?
+  lastUsedAt     DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@map("proxies")
+}
+
+model TaskLog {
+  id             String         @id @default(uuid())
+  taskType       String         // e.g. "SCRAPER", "DRIVE_UPLOAD", "TELEGRAM_PUBLISH"
+  status         String         // "INFO", "SUCCESS", "WARN", "ERROR"
+  message        String         @db.Text
+  metadata       Json?
+  createdAt      DateTime       @default(now())
+
+  @@index([taskType, createdAt])
+  @@map("task_logs")
+}
+
