@@ -18,13 +18,31 @@ import { AnimeModule } from './modules/anime/anime.module';
     ScheduleModule.forRoot(),
     BullModule.forRootAsync({
       inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
-        connection: {
-          host: config.get<string>('REDIS_HOST', '127.0.0.1'),
-          port: config.get<number>('REDIS_PORT', 6379),
-          password: config.get<string>('REDIS_PASSWORD') || undefined,
-        },
-      }),
+      useFactory: (config: ConfigService) => {
+        const redisUrl = config.get<string>('REDIS_URL');
+        if (redisUrl) {
+          const parsed = new URL(redisUrl);
+          const isTls = parsed.protocol === 'rediss:';
+          return {
+            connection: {
+              host: parsed.hostname,
+              port: Number(parsed.port) || 6379,
+              username: parsed.username || undefined,
+              password: parsed.password || undefined,
+              tls: isTls ? {} : undefined,
+              maxRetriesPerRequest: null,
+            },
+          };
+        }
+        return {
+          connection: {
+            host: config.get<string>('REDIS_HOST', '127.0.0.1'),
+            port: Number(config.get<number>('REDIS_PORT', 6379)),
+            password: config.get<string>('REDIS_PASSWORD') || undefined,
+            maxRetriesPerRequest: null,
+          },
+        };
+      },
     }),
     PrismaModule,
     RealtimeModule,
