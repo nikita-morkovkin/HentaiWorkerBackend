@@ -40,6 +40,7 @@ export {
 export class DriveRouterService {
   private readonly logger = new Logger(DriveRouterService.name);
   private readonly masterFolderName = STORAGE_CONSTANTS.MASTER_FOLDER_NAME;
+  private readonly extractingAnimeIds = new Set<string>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -328,14 +329,17 @@ export class DriveRouterService {
         });
 
         if (freshAnime) {
-          const currentCovers = freshAnime.coverUrls || [];
-          const combined = Array.from(new Set([...extractedUrls, ...currentCovers])).slice(0, 10);
+          // Keep only non-frame covers (original posters) so we never duplicate frame batches
+          const baseCovers = (freshAnime.coverUrls || []).filter(
+            (u) => !u.includes('_frame_') && !u.includes('/covers/'),
+          );
+          const combined = [...extractedUrls, ...baseCovers].slice(0, 10);
           await this.prisma.animeTitle.update({
             where: { id: animeTitleId },
             data: { coverUrls: combined },
           });
           this.logger.log(
-            `Added ${extractedUrls.length} new diverse screenshots for anime ${animeTitleId}`,
+            `Saved ${extractedUrls.length} screenshots for anime ${animeTitleId} (total covers: ${combined.length})`,
           );
         }
       } catch (err: any) {
@@ -439,6 +443,12 @@ export class DriveRouterService {
     animeTitleId: string,
     videoUrl: string,
   ): Promise<string | null> {
+    // Prevent concurrent duplicate extractions for the same anime
+    if (this.extractingAnimeIds.has(animeTitleId)) {
+      this.logger.debug(`Screenshots are already being extracted for ${animeTitleId}, skipping concurrent call.`);
+      return null;
+    }
+
     const anime = await this.prisma.animeTitle.findUnique({
       where: { id: animeTitleId },
       select: { coverUrls: true },
@@ -454,8 +464,13 @@ export class DriveRouterService {
       return anime.coverUrls[0] || null;
     }
 
-    const urls = await this.extractMultipleScreenshots(animeTitleId, videoUrl, 4);
-    return urls[0] || null;
+    this.extractingAnimeIds.add(animeTitleId);
+    try {
+      const urls = await this.extractMultipleScreenshots(animeTitleId, videoUrl, 4);
+      return urls[0] || null;
+    } finally {
+      this.extractingAnimeIds.delete(animeTitleId);
+    }
   }
 
   public async streamVideoToDrive(options: UploadStreamOptions): Promise<DriveUploadResult> {

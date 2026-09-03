@@ -4,6 +4,7 @@ import { Job } from 'bullmq';
 import { PostSchedulerService, TELEGRAM_QUEUE_NAME } from './post-scheduler.service';
 import { TelegramChannelScraperService } from './telegram-channel-scraper.service';
 import { GramjsService } from './gramjs.service';
+import { TelegramAutoPostService } from './telegram-autopost.service';
 
 @Processor(TELEGRAM_QUEUE_NAME, {
   concurrency: 1,
@@ -12,6 +13,7 @@ export class TelegramProcessor extends WorkerHost {
   private readonly logger = new Logger(TelegramProcessor.name);
 
   constructor(
+    private readonly autoPostService: TelegramAutoPostService,
     private readonly postScheduler: PostSchedulerService,
     private readonly telegramScraper: TelegramChannelScraperService,
     private readonly gramjsService: GramjsService,
@@ -23,6 +25,9 @@ export class TelegramProcessor extends WorkerHost {
     this.logger.log(`Processing telegram job [${job.name}] #${job.id}`);
 
     switch (job.name) {
+      case 'autopost-tick':
+        return this.autoPostService.processTick();
+
       case 'publish-post':
         return this.postScheduler.executePublish(job.data.postId);
 

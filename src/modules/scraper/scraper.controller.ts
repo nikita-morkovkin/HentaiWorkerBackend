@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { ScraperQueueService } from './scraper-queue.service';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -62,5 +62,29 @@ export class ScraperController {
   @ApiOperation({ summary: 'Clear all pending jobs in scraper queue' })
   public async clearQueue() {
     return this.queueService.clearQueue();
+  }
+
+  @Get('failed-episodes')
+  @ApiOperation({ summary: 'Get all failed episodes with error details' })
+  public async getFailedEpisodes() {
+    return this.queueService.getFailedEpisodes();
+  }
+
+  @Post('retry-episode/:id')
+  @ApiOperation({ summary: 'Retry failed episode scrape & download' })
+  public async retryEpisode(@Param('id') id: string) {
+    return this.queueService.retryEpisode(id);
+  }
+
+  @Post('retry-all-failed')
+  @ApiOperation({ summary: 'Retry all failed episodes' })
+  public async retryAllFailed() {
+    return this.queueService.retryAllFailed();
+  }
+
+  @Delete('failed-episode/:id')
+  @ApiOperation({ summary: 'Clear error status of failed episode' })
+  public async clearFailedEpisode(@Param('id') id: string) {
+    return this.queueService.clearFailedEpisode(id);
   }
 }

@@ -435,7 +435,7 @@ export class CheerioScraperService {
         if (fullSrc.startsWith('//')) fullSrc = 'https:' + fullSrc;
         else if (fullSrc.startsWith('/')) fullSrc = new URL(fullSrc, this.baseUrl).toString();
 
-        if (fullSrc.startsWith('http')) {
+        if (fullSrc.startsWith('http') && this.isValidStreamUrl(fullSrc)) {
           const quality = res ? normalizeVideoQuality(res) : detectVideoQualityFromUrl(fullSrc);
           const lower = (fullSrc + ' ' + res).toLowerCase();
           if (lower.includes('sub') || lower.includes('суб') || lower.includes('саб')) {
@@ -447,9 +447,81 @@ export class CheerioScraperService {
       }
     });
 
+    // 4b. Extract direct stream URLs from script text & data-attributes
+    this.extractUrlsFromScriptText(html, dubQualities, subQualities);
+
     // Label studios if multiple studios exist
     this.labelDistinctStudios(dubQualities);
     this.labelDistinctStudios(subQualities);
+
+    // FALLBACK: If 0 streams found on first pass, reset session cookies and retry
+    if (dubQualities.length === 0 && subQualities.length === 0) {
+      this.logger.warn(
+        `Zero streams found on first pass for ${episodeUrl}, retrying with session reset...`,
+      );
+      const savedCookies = { ...this.sessionCookies };
+      this.sessionCookies = {};
+      this.sessionAuthenticatedAt = 0;
+
+      try {
+        const html2 = await this.fetchHtml(episodeUrl);
+        this.extractStreamsFromHtmlScripts(html2, dubQualities, subQualities);
+        this.extractDirectMp4FromHtml(html2, dubQualities, subQualities);
+        this.extractUrlsFromScriptText(html2, dubQualities, subQualities);
+        await this.extractStreamsFromIframes(html2, episodeUrl, dubQualities, subQualities);
+
+        const $2 = cheerio.load(html2);
+        $2(
+          'video source, source, video, [data-src], [data-file], [data-video], [data-url], [data-player]',
+        ).each((_, el) => {
+          const src =
+            $2(el).attr('src') ||
+            $2(el).attr('data-src') ||
+            $2(el).attr('data-file') ||
+            $2(el).attr('data-video') ||
+            $2(el).attr('data-url') ||
+            $2(el).attr('data-player');
+          const res =
+            $2(el).attr('res') ||
+            $2(el).attr('size') ||
+            $2(el).attr('title') ||
+            $2(el).attr('label') ||
+            '';
+          if (
+            src &&
+            !src.includes('gifpacks') &&
+            !src.includes('preview') &&
+            !src.includes('trailer')
+          ) {
+            let fullSrc = src;
+            if (fullSrc.startsWith('//')) fullSrc = 'https:' + fullSrc;
+            else if (fullSrc.startsWith('/')) fullSrc = new URL(fullSrc, this.baseUrl).toString();
+
+            if (fullSrc.startsWith('http') && this.isValidStreamUrl(fullSrc)) {
+              const quality = res ? normalizeVideoQuality(res) : detectVideoQualityFromUrl(fullSrc);
+              const lower = (fullSrc + ' ' + res).toLowerCase();
+              if (lower.includes('sub') || lower.includes('суб') || lower.includes('саб')) {
+                subQualities.push({ quality, url: fullSrc });
+              } else {
+                dubQualities.push({ quality, url: fullSrc });
+              }
+            }
+          }
+        });
+
+        this.labelDistinctStudios(dubQualities);
+        this.labelDistinctStudios(subQualities);
+
+        if (dubQualities.length > 0 || subQualities.length > 0) {
+          this.logger.log(
+            `Found ${dubQualities.length + subQualities.length} streams after session reset retry for ${episodeUrl}`,
+          );
+        }
+      } catch (e: any) {
+        this.logger.warn(`Retry with session reset failed for ${episodeUrl}: ${e.message}`);
+        this.sessionCookies = savedCookies;
+      }
+    }
 
     let streams: ScrapedEpisodeStream[] = [];
     const dedupDub = deduplicateVideoQualities(dubQualities);
@@ -490,6 +562,24 @@ export class CheerioScraperService {
 
       const contentType = String(res.headers['content-type'] || '');
       return res.status === 200 || res.status === 206 || contentType.includes('video');
+    } catch {
+      return false;
+    }
+  }
+
+  private isValidStreamUrl(url: string): boolean {
+    try {
+      const parsed = new URL(url);
+      const host = parsed.hostname;
+      // Must be http or https
+      if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+      // Hostname must contain a dot (real domain or IP)
+      if (!host.includes('.')) return false;
+      // Hostname must NOT look like a file extension (e.g. www.mp4, cdn.mkv)
+      if (/^[\w-]+\.(mp4|mkv|avi|m3u8|ts|webm|mov|flv)$/i.test(host)) return false;
+      // Hostname must be longer than 3 chars
+      if (host.length < 4) return false;
+      return true;
     } catch {
       return false;
     }
@@ -544,9 +634,15 @@ export class CheerioScraperService {
       /window\.playlist\s*=\s*(\[[\s\S]*?\])\s*;/gi,
       /playlist\s*:\s*(\[[\s\S]*?\])/gi,
       /sources\s*:\s*(\[[\s\S]*?\]|\{[\s\S]*?\})/gi,
-      /file\s*:\s*["'](\[[\s\S]*?\]|https?:\/\/[^"']+)["']/gi,
+      /file\s*:\s*["']([^"']+)["']/gi,
+      /playlist\s*:\s*["']([^"']+)["']/gi,
       /video_config\s*=\s*(\{[\s\S]*?\})\s*;/gi,
       /data-sources=['"](\{[\s\S]*?\}|\[[\s\S]*?\])['"]/gi,
+      /data-(?:config|setup)=['"](\{[\s\S]*?\})['"]/gi,
+      /jwplayer\s*\([^)]*\)\s*\.setup\s*\(\s*(\{[\s\S]*?\})\s*\)/gi,
+      /videojs\s*\([^,)]+,\s*(\{[\s\S]*?\})\s*\)/gi,
+      /\.setup\s*\(\s*(\{[\s\S]*?(?:file|source|src|url)[\s\S]*?\})\s*\)/gi,
+      /(?:var|let|const)\s+(?:config|setup|options|params|settings|playerConfig|videoConfig)\s*=\s*(\{[\s\S]*?\})\s*;/gi,
     ];
 
     for (const pattern of jsonPatterns) {
@@ -554,11 +650,22 @@ export class CheerioScraperService {
       for (const match of matches) {
         if (match && match[1]) {
           try {
-            const raw = match[1].trim();
-            if (raw.startsWith('{') || raw.startsWith('[')) {
-              const parsed = JSON.parse(raw);
-              this.traverseAndCollectStreams(parsed, dubQualities, subQualities);
-            } else if (raw.includes('[') && raw.includes('http')) {
+            let raw = match[1].trim();
+            if (raw.includes('\\/')) {
+              raw = raw.replace(/\\\//g, '/');
+            }
+
+            // Only attempt JSON.parse if it looks like real JSON, not a Playerjs [720p]... string
+            if (raw.startsWith('{') || (raw.startsWith('[') && !raw.match(/^\[[0-9]+p?\]/i))) {
+              try {
+                const parsed = JSON.parse(raw);
+                this.traverseAndCollectStreams(parsed, dubQualities, subQualities);
+              } catch {
+                if (raw.includes('http')) {
+                  this.parsePlayerJsString(raw, dubQualities, subQualities);
+                }
+              }
+            } else if (raw.includes('http')) {
               this.parsePlayerJsString(raw, dubQualities, subQualities);
             }
           } catch {}
@@ -568,6 +675,14 @@ export class CheerioScraperService {
 
     const playerJsMatches = html.matchAll(/Playerjs\s*\(\s*(\{[\s\S]*?\})\s*\)/gi);
     for (const pMatch of playerJsMatches) {
+      try {
+        const parsed = JSON.parse(pMatch[1]);
+        this.traverseAndCollectStreams(parsed, dubQualities, subQualities);
+      } catch {}
+    }
+
+    const playerJsNewMatches = html.matchAll(/new\s+Playerjs\s*\(\s*(\{[\s\S]*?\})\s*\)/gi);
+    for (const pMatch of playerJsNewMatches) {
       try {
         const parsed = JSON.parse(pMatch[1]);
         this.traverseAndCollectStreams(parsed, dubQualities, subQualities);
@@ -592,7 +707,7 @@ export class CheerioScraperService {
       ) {
         if (obj.includes('[') && obj.includes(']')) {
           this.parsePlayerJsString(obj, dubQualities, subQualities, parentKey, studio);
-        } else {
+        } else if (this.isValidStreamUrl(obj)) {
           const quality = detectVideoQualityFromUrl(obj);
           const isSub =
             (parentKey + ' ' + obj).toLowerCase().includes('sub') ||
@@ -638,6 +753,7 @@ export class CheerioScraperService {
               );
             } else if (url.startsWith('http') || url.startsWith('//')) {
               const fullUrl = url.startsWith('//') ? 'https:' + url : url;
+              if (!this.isValidStreamUrl(fullUrl)) continue;
               const quality = qual
                 ? normalizeVideoQuality(String(qual))
                 : detectVideoQualityFromUrl(fullUrl);
@@ -703,11 +819,27 @@ export class CheerioScraperService {
     context: string = '',
     studio?: string,
   ): void {
-    const parts = str.split(',').map((p) => p.trim());
+    if (!str) return;
+    const cleanedStr = str.replace(/\\\//g, '/').replace(/\\"/g, '').replace(/\\'/g, '');
+
+    // Split by comma or ' or ' fallback separators
+    const rawParts = cleanedStr.split(/,\s*(?=\[|\{|https?:\/\/)/i);
+    const parts: string[] = [];
+    for (const rp of rawParts) {
+      if (rp.includes(' or ')) {
+        parts.push(...rp.split(/\s+or\s+/i));
+      } else {
+        parts.push(rp);
+      }
+    }
+
     for (const part of parts) {
-      const match = part.match(/\[([0-9]+p?)\](.*)/i) || part.match(/\{([0-9]+p?)\}(.*)/i);
+      const trimmed = part.trim();
+      if (!trimmed) continue;
+
+      const match = trimmed.match(/\[([0-9]+p?)\](.*)/i) || trimmed.match(/\{([0-9]+p?)\}(.*)/i);
       let quality = '720p';
-      let url = part;
+      let url = trimmed;
       if (match) {
         quality = normalizeVideoQuality(match[1]);
         url = match[2].trim();
@@ -719,7 +851,7 @@ export class CheerioScraperService {
         url = 'https:' + url;
       }
 
-      if (url.startsWith('http')) {
+      if (url.startsWith('http') && this.isValidStreamUrl(url)) {
         const isSub =
           (context + ' ' + url).toLowerCase().includes('sub') ||
           (context + ' ' + url).toLowerCase().includes('саб');
@@ -732,34 +864,115 @@ export class CheerioScraperService {
     }
   }
 
+  private collectIframeUrls(html: string, baseUrl: string): string[] {
+    const $ = cheerio.load(html);
+    const urls: string[] = [];
+    $('iframe').each((_, el) => {
+      let src =
+        $(el).attr('src') ||
+        $(el).attr('data-src') ||
+        $(el).attr('data-lazy-src') ||
+        $(el).attr('data-player') ||
+        $(el).attr('data-url');
+      if (src) {
+        if (src.startsWith('//')) src = 'https:' + src;
+        else if (src.startsWith('/')) src = new URL(src, baseUrl).toString();
+        if (src.startsWith('http') && !urls.includes(src)) {
+          urls.push(src);
+        }
+      }
+    });
+    return urls;
+  }
+
   private async extractStreamsFromIframes(
     html: string,
     baseUrl: string,
     dubQualities: ScrapedVideoQuality[],
     subQualities: ScrapedVideoQuality[],
+    depth: number = 0,
   ): Promise<void> {
-    const $ = cheerio.load(html);
-    const iframeUrls: string[] = [];
+    if (depth > 1) return;
 
-    $('iframe[src]').each((_, el) => {
-      let src = $(el).attr('src');
-      if (src) {
-        if (src.startsWith('//')) src = 'https:' + src;
-        else if (src.startsWith('/')) src = new URL(src, baseUrl).toString();
-        if (src.startsWith('http') && !iframeUrls.includes(src)) {
-          iframeUrls.push(src);
-        }
-      }
-    });
+    const iframeUrls = this.collectIframeUrls(html, baseUrl);
 
-    for (const iframeUrl of iframeUrls.slice(0, 3)) {
+    for (const iframeUrl of iframeUrls.slice(0, 4)) {
       try {
-        this.logger.log(`Fetching embedded player iframe: ${iframeUrl}`);
+        this.logger.log(`Fetching embedded player iframe (depth=${depth}): ${iframeUrl}`);
         const iframeHtml = await this.fetchHtml(iframeUrl, baseUrl);
         this.extractStreamsFromHtmlScripts(iframeHtml, dubQualities, subQualities);
         this.extractDirectMp4FromHtml(iframeHtml, dubQualities, subQualities);
+        this.extractUrlsFromScriptText(iframeHtml, dubQualities, subQualities);
+
+        // Recursion to next depth level
+        await this.extractStreamsFromIframes(
+          iframeHtml,
+          iframeUrl,
+          dubQualities,
+          subQualities,
+          depth + 1,
+        );
       } catch (e: any) {
-        this.logger.debug(`Could not inspect iframe ${iframeUrl}: ${e.message}`);
+        this.logger.debug(`Could not inspect iframe ${iframeUrl} (depth=${depth}): ${e.message}`);
+      }
+    }
+  }
+
+  private extractUrlsFromScriptText(
+    html: string,
+    dubQualities: ScrapedVideoQuality[],
+    subQualities: ScrapedVideoQuality[],
+  ): void {
+    const $ = cheerio.load(html);
+    const scriptContent: string[] = [];
+
+    $('script').each((_, el) => {
+      const text = $(el).text();
+      if (text && text.length > 5) scriptContent.push(text);
+    });
+
+    $('[data-file],[data-src],[data-source],[data-url],[data-video],[data-stream]').each((_, el) => {
+      for (const attr of [
+        'data-file',
+        'data-src',
+        'data-source',
+        'data-url',
+        'data-video',
+        'data-stream',
+      ]) {
+        const val = $(el).attr(attr);
+        if (val) scriptContent.push(val);
+      }
+    });
+
+    const combined = scriptContent.join('\n').replace(/\\\//g, '/');
+
+    // Matches any quoted URL ending with .mp4, .m3u8, or .ts
+    const urlMatches = combined.match(/https?:\/\/[^"'\s`<>]+\.(?:mp4|m3u8|ts)(?:\?[^"'\s`<>]*)?/gi);
+    if (!urlMatches) return;
+
+    const uniqueUrls = new Set(urlMatches);
+
+    for (const url of uniqueUrls) {
+      if (!this.isValidStreamUrl(url)) continue;
+      if (
+        ['gifpack', 'preview', 'trailer', 'thumbnail', 'poster', 'cover', 'banner'].some((w) =>
+          url.toLowerCase().includes(w),
+        )
+      ) {
+        continue;
+      }
+
+      const quality = detectVideoQualityFromUrl(url);
+      const lower = url.toLowerCase();
+      if (lower.includes('sub') || lower.includes('саб')) {
+        if (!subQualities.some((q) => q.url === url)) {
+          subQualities.push({ quality, url, rawQuality: quality });
+        }
+      } else {
+        if (!dubQualities.some((q) => q.url === url)) {
+          dubQualities.push({ quality, url, rawQuality: quality });
+        }
       }
     }
   }
@@ -775,6 +988,7 @@ export class CheerioScraperService {
 
     for (const url of mp4Matches) {
       if (url.includes('gifpacks') || url.includes('preview') || url.includes('trailer')) continue;
+      if (!this.isValidStreamUrl(url)) continue;
 
       const quality = detectVideoQualityFromUrl(url);
       const lower = url.toLowerCase();

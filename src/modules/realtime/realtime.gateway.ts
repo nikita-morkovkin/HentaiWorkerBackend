@@ -39,6 +39,30 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
     } catch (err: any) {
       this.logger.warn(`Could not send init logs to client ${client.id}: ${err.message}`);
     }
+
+    try {
+      const failedEpisodes = await this.prisma.animeEpisode.findMany({
+        where: { status: 'ERROR' },
+        include: { animeTitle: { select: { russianTitle: true, englishTitle: true } } },
+        orderBy: { updatedAt: 'desc' },
+        take: 200,
+      });
+
+      client.emit(
+        'scraper:failed_files',
+        failedEpisodes.map((ep) => ({
+          episodeId: ep.id,
+          animeTitleId: ep.animeTitleId,
+          animeTitle: ep.animeTitle.russianTitle,
+          englishTitle: ep.animeTitle.englishTitle,
+          episodeNumber: ep.episodeNumber,
+          errorMessage: ep.errorMessage,
+          updatedAt: ep.updatedAt.toISOString(),
+        })),
+      );
+    } catch (err: any) {
+      this.logger.warn(`Could not send failed files to client ${client.id}: ${err.message}`);
+    }
   }
 
   public handleDisconnect(client: Socket) {
@@ -57,6 +81,26 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
   }) {
     if (this.server) {
       this.server.emit('upload:progress', data);
+    }
+  }
+
+  public emitFailedFile(data: {
+    episodeId: string;
+    animeTitleId: string;
+    animeTitle: string;
+    englishTitle: string;
+    episodeNumber: number;
+    errorMessage: string | null;
+    updatedAt: string;
+  }) {
+    if (this.server) {
+      this.server.emit('scraper:failed_file', data);
+    }
+  }
+
+  public emitFailedCleared(episodeId: string) {
+    if (this.server) {
+      this.server.emit('scraper:failed_cleared', { episodeId });
     }
   }
 

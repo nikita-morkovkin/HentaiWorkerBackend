@@ -62,6 +62,7 @@ export class GramjsService {
       try {
         const res = await axios.get(options.videoUrlOrPath, {
           responseType: 'stream',
+          headers: options.headers,
           timeout: HTTP_CONSTANTS.STREAM_DOWNLOAD_TIMEOUT_MS,
         });
 

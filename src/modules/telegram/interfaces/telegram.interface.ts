@@ -3,6 +3,7 @@ export interface TelegramUploadOptions {
   videoUrlOrPath: string;
   caption: string;
   fileName: string;
+  headers?: Record<string, string>;
   onProgress?: (progress: number) => void;
 }
 

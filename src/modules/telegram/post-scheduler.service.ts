@@ -1,8 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
 import { GramjsService } from './gramjs.service';
 import { TelegramBotService } from './telegram-bot.service';
+import { DriveRouterService } from '../storage/drive-router.service';
 import { CreateTelegramPostDto } from './dto/telegram.dto';
 import { TelegramPublishResult } from './interfaces/telegram.interface';
 import { InjectQueue } from '@nestjs/bullmq';
@@ -20,6 +21,7 @@ export class PostSchedulerService {
     private readonly settingsService: SettingsService,
     private readonly gramjsService: GramjsService,
     private readonly botService: TelegramBotService,
+    private readonly driveRouter: DriveRouterService,
     @InjectQueue(TELEGRAM_QUEUE_NAME) private readonly telegramQueue: Queue,
   ) {}
 
@@ -56,11 +58,61 @@ export class PostSchedulerService {
       where: { id: dto.animeTitleId },
       include: { episodes: { include: { files: true } } },
     });
-    if (!anime) throw new Error('Anime title not found');
+    if (!anime) throw new NotFoundException('Anime title not found');
 
     const episode = dto.episodeId
       ? anime.episodes.find((e) => e.id === dto.episodeId)
       : anime.episodes[0];
+
+    if (!episode) {
+      throw new BadRequestException('Серия не найдена у данного аниме');
+    }
+
+    const cloudFiles = (episode.files || []).filter(
+      (f) => Boolean(f.driveFileId || f.driveViewLink)
+    );
+
+    if (cloudFiles.length === 0) {
+      throw new BadRequestException(
+        `Для серии ${episode.episodeNumber} в Google Drive нет загруженных видеофайлов`
+      );
+    }
+
+    // Validate selectedAudio against cloud files
+    const hasDub = cloudFiles.some((f) => f.type === 'DUB');
+    const hasSub = cloudFiles.some((f) => f.type === 'SUB');
+
+    if (dto.selectedAudio === 'DUB' && !hasDub) {
+      throw new BadRequestException(
+        `В облаке Google Drive отсутствует русская озвучка (DUB) для серии ${episode.episodeNumber}`
+      );
+    }
+    if (dto.selectedAudio === 'SUB' && !hasSub) {
+      throw new BadRequestException(
+        `В облаке Google Drive отсутствуют субтитры (SUB) для серии ${episode.episodeNumber}`
+      );
+    }
+
+    // Validate selectedQualities against cloud files
+    let relevantFiles = cloudFiles;
+    if (dto.selectedAudio === 'DUB') {
+      relevantFiles = cloudFiles.filter((f) => f.type === 'DUB');
+    } else if (dto.selectedAudio === 'SUB') {
+      relevantFiles = cloudFiles.filter((f) => f.type === 'SUB');
+    }
+
+    const availableQualities = Array.from(new Set(relevantFiles.map((f) => f.quality)));
+
+    if (dto.selectedQualities && dto.selectedQualities.length > 0) {
+      const missingQualities = dto.selectedQualities.filter(
+        (q) => !availableQualities.includes(q)
+      );
+      if (missingQualities.length > 0) {
+        throw new BadRequestException(
+          `Качество ${missingQualities.join(', ')} отсутствует в облаке Google Drive для выбранной озвучки (доступно: ${availableQualities.join(', ') || 'нет'})`
+        );
+      }
+    }
 
     const caption = this.generatePostCaption(anime, episode, dto.targetChannel, dto.caption);
     const isScheduled = dto.scheduledAt && new Date(dto.scheduledAt).getTime() > Date.now();
@@ -125,21 +177,50 @@ export class PostSchedulerService {
         throw new Error('No target channel IDs configured in Telegram settings');
       }
 
-      let targetFile = post.episode?.files.find(
+      const cloudFiles = (post.episode?.files || []).filter(
+        (f) => Boolean(f.driveFileId || f.driveViewLink)
+      );
+
+      let targetFile = cloudFiles.find(
         (f) =>
           (post.selectedAudio === 'BOTH' || f.type === post.selectedAudio) &&
           post.selectedQualities.includes(f.quality),
       );
 
-      if (!targetFile && post.episode?.files.length) {
-        targetFile = post.episode.files[0];
+      if (!targetFile && cloudFiles.length > 0) {
+        targetFile = cloudFiles[0];
+      }
+
+      if (!targetFile) {
+        throw new Error(
+          `В Google Drive не найдены видеофайлы для серии ${post.episode?.episodeNumber || ''}`
+        );
       }
 
       for (const channelId of channelsToPost) {
-        if (targetFile && targetFile.sourceStreamUrl) {
+        let streamUrl = targetFile.sourceStreamUrl;
+        let downloadHeaders: Record<string, string> | undefined;
+
+        if (!streamUrl && targetFile.driveFileId && targetFile.driveAccountId) {
+          try {
+            const driveInfo = await this.driveRouter.getDriveStreamInfo(
+              targetFile.driveFileId,
+              targetFile.driveAccountId,
+            );
+            streamUrl = driveInfo.url;
+            downloadHeaders = {
+              Authorization: driveInfo.authHeader.replace('Authorization: ', '').trim(),
+            };
+          } catch (e: any) {
+            this.logger.warn(`Failed to obtain Google Drive stream: ${e.message}`);
+          }
+        }
+
+        if (streamUrl) {
           await this.gramjsService.uploadStreamingVideo({
             channelId,
-            videoUrlOrPath: targetFile.sourceStreamUrl,
+            videoUrlOrPath: streamUrl,
+            headers: downloadHeaders,
             caption: post.caption,
             fileName: targetFile.fileName || `${post.animeTitle.russianTitle}.mp4`,
           });

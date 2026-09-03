@@ -260,6 +260,67 @@ export class ScraperProcessor extends WorkerHost {
     }
 
     const data = job.data;
+
+    // Validate stream URL before processing to prevent ENOTFOUND crashes
+    try {
+      const parsed = new URL(data.sourceStreamUrl);
+      const host = parsed.hostname;
+      if (
+        !host.includes('.') ||
+        /^[\w-]+\.(mp4|mkv|avi|m3u8|ts|webm|mov|flv)$/i.test(host) ||
+        !['http:', 'https:'].includes(parsed.protocol)
+      ) {
+        this.logger.error(
+          `Invalid stream URL for ${data.russianTitle} - Ep ${data.episodeNumber}: "${data.sourceStreamUrl}" — skipping`,
+        );
+        await this.realtime.emitLog(
+          'DRIVE_UPLOAD',
+          'ERROR',
+          `Невалидный URL стрима (hostname не является доменом): ${data.sourceStreamUrl}`,
+        );
+        await this.prisma.animeEpisode.update({
+          where: { id: data.episodeId },
+          data: { status: 'ERROR', errorMessage: `Invalid stream URL: ${data.sourceStreamUrl}` },
+        });
+        await this.prisma.animeTitle.update({
+          where: { id: data.animeId },
+          data: { status: 'ERROR' },
+        });
+        this.realtime.emitFailedFile({
+          episodeId: data.episodeId,
+          animeTitleId: data.animeId,
+          animeTitle: data.russianTitle,
+          englishTitle: data.englishTitle,
+          episodeNumber: data.episodeNumber,
+          errorMessage: `Invalid stream URL: ${data.sourceStreamUrl}`,
+          updatedAt: new Date().toISOString(),
+        });
+        return { error: 'invalid_url', skipped: true };
+      }
+    } catch {
+      this.logger.error(
+        `Unparseable stream URL for ${data.russianTitle} Ep ${data.episodeNumber}: ${data.sourceStreamUrl}`,
+      );
+      await this.prisma.animeEpisode.update({
+        where: { id: data.episodeId },
+        data: { status: 'ERROR', errorMessage: `Unparseable stream URL: ${data.sourceStreamUrl}` },
+      });
+      await this.prisma.animeTitle.update({
+        where: { id: data.animeId },
+        data: { status: 'ERROR' },
+      });
+      this.realtime.emitFailedFile({
+        episodeId: data.episodeId,
+        animeTitleId: data.animeId,
+        animeTitle: data.russianTitle,
+        englishTitle: data.englishTitle,
+        episodeNumber: data.episodeNumber,
+        errorMessage: `Unparseable stream URL: ${data.sourceStreamUrl}`,
+        updatedAt: new Date().toISOString(),
+      });
+      return { error: 'unparseable_url', skipped: true };
+    }
+
     const proxyUrl = await this.settingsService.getRotatingProxy();
     const signal = this.queueService.getActiveSignal();
 
@@ -360,13 +421,24 @@ export class ScraperProcessor extends WorkerHost {
       );
 
       try {
-        await this.prisma.animeEpisode.update({
+        const failedEp = await this.prisma.animeEpisode.update({
           where: { id: data.episodeId },
           data: { status: 'ERROR', errorMessage: err.message },
+          include: { animeTitle: { select: { russianTitle: true, englishTitle: true } } },
         });
         await this.prisma.animeTitle.update({
           where: { id: data.animeId },
           data: { status: 'ERROR' },
+        });
+
+        this.realtime.emitFailedFile({
+          episodeId: data.episodeId,
+          animeTitleId: data.animeId,
+          animeTitle: failedEp.animeTitle.russianTitle,
+          englishTitle: failedEp.animeTitle.englishTitle,
+          episodeNumber: data.episodeNumber,
+          errorMessage: err.message,
+          updatedAt: failedEp.updatedAt.toISOString(),
         });
       } catch {}
 

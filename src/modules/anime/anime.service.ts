@@ -139,8 +139,11 @@ export class AnimeService {
     const formatted = items.map((anime) => {
       const totalEpisodes = anime.episodes.length;
       const uploadedEpisodes = anime.episodes.filter((e) => e.status === 'UPLOADED').length;
-      const hasDub = anime.episodes.some((e) => e.files.some((f) => f.type === 'DUB'));
-      const hasSub = anime.episodes.some((e) => e.files.some((f) => f.type === 'SUB'));
+      const cloudFiles = anime.episodes.flatMap((e) =>
+        e.files.filter((f) => Boolean(f.driveFileId || f.driveViewLink)),
+      );
+      const hasDub = cloudFiles.some((f) => f.type === 'DUB');
+      const hasSub = cloudFiles.some((f) => f.type === 'SUB');
 
       const isPublishedToTelegram = anime.telegramPosts && anime.telegramPosts.length > 0;
       const publishedChannels = Array.from(
@@ -151,8 +154,8 @@ export class AnimeService {
       );
 
       const availableQualities = Array.from(
-        new Set(anime.episodes.flatMap((e) => e.files.map((f) => f.quality))),
-      );
+        new Set(cloudFiles.map((f) => f.quality).filter(Boolean)),
+      ).sort((a, b) => (parseInt(b, 10) || 0) - (parseInt(a, 10) || 0));
 
       const formattedEpisodes = anime.episodes.map((ep) => ({
         ...ep,
@@ -222,6 +225,17 @@ export class AnimeService {
     const publishedChannels = Array.from(new Set(publishedPosts.map((p) => p.targetChannel)));
     const episodePublishedMap = new Set(publishedPosts.map((p) => p.episodeId).filter(Boolean));
 
+    const totalEpisodes = anime.episodes.length;
+    const uploadedEpisodes = anime.episodes.filter((e) => e.status === 'UPLOADED').length;
+    const cloudFiles = anime.episodes.flatMap((e) =>
+      e.files.filter((f) => Boolean(f.driveFileId || f.driveViewLink)),
+    );
+    const hasDub = cloudFiles.some((f) => f.type === 'DUB');
+    const hasSub = cloudFiles.some((f) => f.type === 'SUB');
+    const availableQualities = Array.from(
+      new Set(cloudFiles.map((f) => f.quality).filter(Boolean)),
+    ).sort((a, b) => (parseInt(b, 10) || 0) - (parseInt(a, 10) || 0));
+
     const formattedEpisodes = anime.episodes.map((ep) => ({
       ...ep,
       isPublishedToTelegram:
@@ -238,6 +252,11 @@ export class AnimeService {
       isPublishedToTelegram,
       publishedChannels,
       episodes: formattedEpisodes,
+      totalEpisodes,
+      uploadedEpisodes,
+      hasDub,
+      hasSub,
+      availableQualities,
       driveAccount: anime.driveAccount
         ? {
             ...anime.driveAccount,

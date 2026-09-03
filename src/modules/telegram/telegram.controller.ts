@@ -3,6 +3,7 @@ import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { PostSchedulerService, TELEGRAM_QUEUE_NAME } from './post-scheduler.service';
+import { TelegramAutoPostService } from './telegram-autopost.service';
 import { TelegramBotService } from './telegram-bot.service';
 import { TelegramChannelScraperService } from './telegram-channel-scraper.service';
 import { CreateTelegramPostDto, SendDirectMessageDto } from './dto/telegram.dto';
@@ -12,11 +13,42 @@ import { ScrapeTelegramChannelDto, ScrapeTelegramPostDto } from './dto/telegram-
 @Controller('api/telegram')
 export class TelegramController {
   constructor(
+    private readonly autoPostService: TelegramAutoPostService,
     private readonly postScheduler: PostSchedulerService,
     private readonly botService: TelegramBotService,
     private readonly scraperService: TelegramChannelScraperService,
     @InjectQueue(TELEGRAM_QUEUE_NAME) private readonly telegramQueue: Queue,
   ) {}
+
+  @Get('autopost/status')
+  @ApiOperation({ summary: 'Get current Telegram auto-posting status & stats' })
+  public async getAutoPostStatus() {
+    return this.autoPostService.getStatus();
+  }
+
+  @Post('autopost/start')
+  @ApiOperation({ summary: 'Start or resume Telegram auto-posting' })
+  public async startAutoPost() {
+    return this.autoPostService.start();
+  }
+
+  @Post('autopost/pause')
+  @ApiOperation({ summary: 'Pause Telegram auto-posting' })
+  public async pauseAutoPost() {
+    return this.autoPostService.pause();
+  }
+
+  @Post('autopost/interval')
+  @ApiOperation({ summary: 'Update Telegram auto-posting interval in minutes' })
+  public async setAutoPostInterval(@Body('intervalMinutes') intervalMinutes: number) {
+    return this.autoPostService.setInterval(Number(intervalMinutes));
+  }
+
+  @Post('autopost/trigger-next')
+  @ApiOperation({ summary: 'Immediately trigger publishing the next anime in queue' })
+  public async triggerNextAutoPost() {
+    return this.autoPostService.triggerNextNow();
+  }
 
   @Post('posts')
   @ApiOperation({ summary: 'Create and schedule or immediately publish a Telegram video post' })

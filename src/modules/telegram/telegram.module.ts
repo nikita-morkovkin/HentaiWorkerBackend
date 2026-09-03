@@ -6,6 +6,7 @@ import { FFmpegThumbnailService } from './ffmpeg-thumbnail.service';
 import { PostSchedulerService, TELEGRAM_QUEUE_NAME } from './post-scheduler.service';
 import { TelegramChannelScraperService } from './telegram-channel-scraper.service';
 import { TelegramProcessor } from './telegram.processor';
+import { TelegramAutoPostService } from './telegram-autopost.service';
 import { TelegramController } from './telegram.controller';
 
 @Global()
@@ -21,6 +22,7 @@ import { TelegramController } from './telegram.controller';
   ],
   controllers: [TelegramController],
   providers: [
+    TelegramAutoPostService,
     GramjsService,
     TelegramBotService,
     FFmpegThumbnailService,
@@ -29,6 +31,7 @@ import { TelegramController } from './telegram.controller';
     TelegramProcessor,
   ],
   exports: [
+    TelegramAutoPostService,
     GramjsService,
     TelegramBotService,
     FFmpegThumbnailService,
